@@ -3,6 +3,8 @@ import httpx
 import base64
 import logging
 import os
+import random
+import urllib.parse
 from typing import Optional
 from gigachat import GigaChat
 
@@ -46,7 +48,6 @@ async def send_to_google_sheets(payload: dict):
     except Exception as e: logging.error(f"Google Sheets Error: {e}")
 
 def log_action_bg(user_id: str, action: str, details: str = "", cost: int = 0):
-    # Ограничиваем длину деталей лога для безопасности
     short_details = (details[:200] + '...') if len(details) > 200 else details
     payload = {"type": "log", "user_id": user_id, "action": action, "details": short_details, "cost": cost}
     asyncio.create_task(send_to_google_sheets(payload))
@@ -89,13 +90,12 @@ async def ai_generate_lyrics(idea: str, language: str, is_pro: bool = False) -> 
     
     if is_pro:
         sys = (
-            "Ты — платиновый хитмейкер. Твоя задача — написать ОРИГИНАЛЬНЫЙ текст песни для Suno v5.5.\n"
-            "СТРОГИЕ ПРАВИЛА:\n"
-            "1. НИКАКИХ ИМЕН АРТИСТОВ В ТЕКСТЕ! Пользователь часто указывает имена (например, Майкл Джексон, Rammstein, Варум) как референс стиля. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО упоминать эти имена, фамилии или псевдонимы в самой песне! За нарушение этого правила текст будет забракован.\n"
-            "2. СТИЛИЗАЦИЯ: Если указаны артисты, перейми ТОЛЬКО их вайб, ритмику, подачу, сленг и настроение. Песня должна быть самостоятельной.\n"
-            "3. СТРУКТУРА: [Intro], [Verse 1], [Pre-Chorus], [Catchy Chorus], [Bridge], [Outro], [End]. В скобках пиши инструкции для певца (melisma, whisper).\n"
-            "4. УДАРЕНИЯ: В русских словах ставь ЗАГЛАВНУЮ букву на ударную гласную (зАмок / замОк).\n"
-            "Выведи строго текст песни без вступлений, без символов ```."
+            "Ты — платиновый хитмейкер. Твоя задача — написать текст песни.\n"
+            "🚨 КРИТИЧЕСКОЕ ПРАВИЛО: Пользователь будет называть имена певцов (например, Майкл Джексон, Анжелика Варум). ОН ПРОСИТ ИХ МУЗЫКАЛЬНЫЙ СТИЛЬ, А НЕ ПЕСНЮ О НИХ!\n"
+            "Тебе КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать эти имена в тексте. Героями песни не могут быть реальные артисты. Песня должна быть о чувствах, мыслях или сюжете.\n"
+            "Структура: [Intro], [Verse 1], [Chorus], [Bridge], [Outro].\n"
+            "Ударения: В русских словах ставь ЗАГЛАВНУЮ букву на ударную гласную (зАмок / замОк).\n"
+            "Выведи только текст."
         )
         res = await call_pro_llm(f"Тема и референсы: '{idea}'. {lang_prompt}", sys)
         if not res.startswith("ERROR"):
@@ -105,10 +105,9 @@ async def ai_generate_lyrics(idea: str, language: str, is_pro: bool = False) -> 
     try:
         sys_basic = (
             "Ты профессиональный поэт-песенник. Напиши текст песни. "
-            "КРИТИЧЕСКОЕ ПРАВИЛО: Пользователь может указать имена реальных певцов как пример стиля. "
-            "ТЕБЕ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО ПИСАТЬ ИМЕНА И ФАМИЛИИ ЛЮДЕЙ В ТЕКСТАХ ПЕСЕН! "
-            "Стихи должны быть универсальными, без Майклов Джексонов и прочих имен. "
-            "Выведи ТОЛЬКО текст без символов ```."
+            "🚨 ВАЖНО: Если в запросе есть имена (Майкл Джексон и т.д.), это указание на музыкальный стиль! "
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать эти имена в тексте песни. Песня должна быть без упоминания реальных артистов. "
+            "Выведи ТОЛЬКО текст."
         )
         res = await safe_request(lambda: giga.achat(f"{sys_basic} Запрос пользователя: {idea}. {lang_prompt}"))
         return sanitize_text(res.choices[0].message.content, max_len=2500).replace("```", "").strip()
@@ -180,22 +179,30 @@ async def ai_edit_style(old_style: str, edit_request: str, is_pro: bool = False)
 
 # --- ОБЛОЖКИ И МУЗЫКА ---
 async def ai_generate_cover_prompt(title: str, style: str, is_pro: bool = False) -> str:
-    prompt = f"DALL-E 3 prompt for album cover '{title}' in style {style}. High detail, cinematic. English ONLY."
-    if is_pro:
-        res = await call_pro_llm(prompt, "Create a professional DALL-E 3 prompt. Output only prompt.")
-        if not res.startswith("ERROR"):
-            return sanitize_text(res)
-            
-    if not giga: return f"Album cover '{title}'"
-    try:
-        res = await safe_request(lambda: giga.achat(prompt))
-        return sanitize_text(res.choices[0].message.content)
-    except Exception: return f"Album cover '{title}'"
+    # Возвращаем красивый промпт, описывающий стиль, для бесплатного генератора
+    safe_prompts = [
+        f"A beautiful aesthetic album cover for {style} music, vibrant colors, cinematic lighting, masterpiece",
+        f"A creative and moody album cover art, {style} vibe, highly detailed, 8k resolution",
+        f"Abstract visual representation of {style} music, cool shapes, neon glow, music album art",
+        f"A cinematic and dramatic cover art for a {style} song, atmospheric, high quality"
+    ]
+    return random.choice(safe_prompts)
 
 async def generate_suno_music(lyrics: str, style: str, is_instrumental: bool, title: str, model_version: str) -> Optional[str]:
     if not MUSIC_KEY: return None
     headers = {"Authorization": f"Bearer {MUSIC_KEY}", "Content-Type": "application/json"}
-    payload = {"model": model_version, "prompt": lyrics, "style": style, "title": title, "make_instrumental": is_instrumental, "custom_mode": True}
+    
+    # Жёстко обрезаем название песни до 75 символов
+    safe_title = title[:75] if title else "My Song"
+    
+    payload = {
+        "model": model_version, 
+        "prompt": lyrics, 
+        "style": style, 
+        "title": safe_title, 
+        "make_instrumental": is_instrumental, 
+        "custom_mode": True
+    }
     
     async with generation_semaphore:
         try:
@@ -218,16 +225,21 @@ async def generate_suno_music(lyrics: str, style: str, is_instrumental: bool, ti
             return None
 
 async def generate_image(prompt: str) -> Optional[bytes]:
-    if not PROXY_KEY: return None
-    headers = {"Authorization": f"Bearer {PROXY_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "dall-e-3", "prompt": prompt, "n": 1, "size": "1024x1024", "response_format": "b64_json"}
+    # 🔥 ИСПОЛЬЗУЕМ БЕСПЛАТНЫЙ СЕРВИС POLLINATIONS.AI
+    encoded_prompt = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+    
     async with generation_semaphore:
         try:
-            resp = await safe_request(lambda: http_client.post("https://api.proxyapi.ru/openai/v1/images/generations", json=payload, headers=headers, timeout=150.0))
-            if resp.status_code == 200: return base64.b64decode(resp.json()["data"][0]["b64_json"])
-            return None
+            # Делаем простой GET-запрос: сервис сразу отдаёт картинку
+            resp = await safe_request(lambda: http_client.get(url, timeout=60.0))
+            if resp.status_code == 200:
+                return resp.content
+            else:
+                logging.error(f"Free image generation failed with status {resp.status_code}")
+                return None
         except Exception as e: 
-            logging.error(f"DALL-E image error: {e}")
+            logging.error(f"Free image generation error: {e}")
             return None
 
 # --- AI КАВЕР ---
